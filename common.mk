@@ -1,13 +1,13 @@
 #Common headers
-common_includes := $(LOCAL_PATH)/../libgralloc
-common_includes += $(LOCAL_PATH)/../liboverlay
-common_includes += $(LOCAL_PATH)/../libcopybit
-common_includes += $(LOCAL_PATH)/../libqdutils
-common_includes += $(LOCAL_PATH)/../libhwcomposer
-common_includes += $(LOCAL_PATH)/../libhdmi
-common_includes += $(LOCAL_PATH)/../libqservice
+common_includes := hardware/qcom/display-caf-msm8994/libgralloc
+common_includes += hardware/qcom/display-caf-msm8994/liboverlay
+common_includes += hardware/qcom/display-caf-msm8994/libcopybit
+common_includes += hardware/qcom/display-caf-msm8994/libqdutils
+common_includes += hardware/qcom/display-caf-msm8994/libhwcomposer
+common_includes += hardware/qcom/display-caf-msm8994/libhdmi
+common_includes += hardware/qcom/display-caf-msm8994/libqservice
 
-common_header_export_path := qcom/display
+common_header_export_path := qcom/display-caf-msm8994
 
 #Common libraries external to display HAL
 common_libs := liblog libutils libcutils libhardware
@@ -41,7 +41,7 @@ endif
 ifneq ($(call is-platform-sdk-version-at-least,18),true)
     common_flags += -DANDROID_JELLYBEAN_MR1=1
 endif
-ifeq ($(call is-vendor-board-platform,QCOM),true)
+#ifeq ($(call is-vendor-board-platform,QCOM),true)
 # This check is to pick the kernel headers from the right location.
 # If the macro above is defined, we make the assumption that we have the kernel
 # available in the build tree.
@@ -49,4 +49,4 @@ ifeq ($(call is-vendor-board-platform,QCOM),true)
 # failing which, they are picked from bionic.
     common_deps += $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr
     kernel_includes += $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr/include
-endif
+#endif

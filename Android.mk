@@ -1,8 +1,6 @@
-ifeq ($(call is-board-platform-in-list, thulium),true)
-    TARGET_USES_SDE = true
-else
-    TARGET_USES_SDE = false
-endif
+ifeq ($(TARGET_QCOM_DISPLAY_VARIANT),caf-msm8994)
+# This flag will be set to true during migration to Snapdragon Display Engine.
+TARGET_USES_SDE = false
 
 display-hals := libgralloc libcopybit liblight libmemtrack libqservice libqdutils
 
@@ -18,5 +16,6 @@ ifeq ($(call is-vendor-board-platform,QCOM),true)
 else
 ifneq ($(filter msm% apq%,$(TARGET_BOARD_PLATFORM)),)
     include $(call all-named-subdir-makefiles,$(display-hals))
+endif
 endif
 endif
