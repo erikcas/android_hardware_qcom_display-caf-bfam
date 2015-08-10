@@ -48,6 +48,7 @@ public:
     /* dumpsys */
     void dump(android::String8& buf);
     bool isGLESOnlyComp() { return (mCurrentFrame.mdpCount == 0); }
+    bool isMDPComp() { return mModeOn; }
     int drawOverlap(hwc_context_t *ctx, hwc_display_contents_1_t* list);
     static MDPComp* getObject(hwc_context_t *ctx, const int& dpy);
     /* Handler to invoke frame redraw on Idle Timer expiry */
@@ -56,6 +57,7 @@ public:
     static bool init(hwc_context_t *ctx);
     static void resetIdleFallBack() { sIdleFallBack = false; }
     static bool isIdleFallback() { return sIdleFallBack; }
+    void setDynRefreshRate(hwc_context_t *ctx, hwc_display_contents_1_t* list);
 
 protected:
     enum { MAX_SEC_LAYERS = 1 }; //TODO add property support
@@ -129,6 +131,8 @@ protected:
         void updateCounts(const FrameInfo&);
         bool isSameFrame(const FrameInfo& curFrame,
                          hwc_display_contents_1_t* list);
+        bool isSameFrame(hwc_context_t *ctx, int dpy,
+                                        hwc_display_contents_1_t* list);
     };
 
     /* allocates pipe from pipe book */
@@ -192,7 +196,8 @@ protected:
     /* checks for mdp comp dimension limitation */
     bool isValidDimension(hwc_context_t *ctx, hwc_layer_1_t *layer);
     /* tracks non updating layers*/
-    void updateLayerCache(hwc_context_t* ctx, hwc_display_contents_1_t* list);
+    void updateLayerCache(hwc_context_t* ctx, hwc_display_contents_1_t* list,
+                          FrameInfo& frame);
     /* optimize layers for mdp comp*/
     bool markLayersForCaching(hwc_context_t* ctx,
             hwc_display_contents_1_t* list);
@@ -206,7 +211,7 @@ protected:
 
         /* updates cache map with YUV info */
     void updateYUV(hwc_context_t* ctx, hwc_display_contents_1_t* list,
-            bool secureOnly);
+            bool secureOnly, FrameInfo& frame);
     /* Validates if the GPU/MDP layer split chosen by a strategy is supported
      * by MDP.
      * Sets up MDP comp data structures to reflect covnversion from layers to
@@ -228,8 +233,6 @@ protected:
     static bool sEnablePartialFrameUpdate;
     static bool sDebugLogs;
     static bool sIdleFallBack;
-    /* Handles the timeout event from kernel, if the value is set to true  */
-    static bool sHandleTimeout;
     static int sMaxPipesPerMixer;
     static IdleInvalidator *idleInvalidator;
     struct FrameInfo mCurrentFrame;
@@ -239,6 +242,7 @@ protected:
     bool allocSplitVGPipesfor4k2k(hwc_context_t *ctx,
             hwc_display_contents_1_t* list, int index);
     bool mModeOn; // if prepare happened
+    bool mPrevModeOn; //if previous prepare happened
 };
 
 class MDPCompNonSplit : public MDPComp {

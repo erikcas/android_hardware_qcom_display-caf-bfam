@@ -38,7 +38,7 @@
 #include "hwc_copybit.h"
 #include "hwc_dump_layers.h"
 #include "hwc_vpuclient.h"
-#include "external.h"
+#include "hdmi.h"
 #include "virtual.h"
 #include "hwc_qclient.h"
 #include "QService.h"
@@ -47,6 +47,7 @@
 #include "hwc_virtual.h"
 
 using namespace qClient;
+using namespace qdutils;
 using namespace qService;
 using namespace android;
 using namespace overlay;
@@ -74,6 +75,55 @@ EGLAPI EGLBoolean eglGpuPerfHintQCOM(EGLDisplay dpy, EGLContext ctx,
 #endif
 
 namespace qhwc {
+
+// Std refresh rates for digital videos- 24p, 30p, 48p and 60p
+uint32_t stdRefreshRates[] = { 30, 24, 48, 60 };
+
+// external display class state
+void updateDisplayInfo(hwc_context_t* ctx, int dpy) {
+    ctx->dpyAttr[dpy].fd = ctx->mHDMIDisplay->getFd();
+    ctx->dpyAttr[dpy].xres = ctx->mHDMIDisplay->getWidth();
+    ctx->dpyAttr[dpy].yres = ctx->mHDMIDisplay->getHeight();
+    ctx->dpyAttr[dpy].mDownScaleMode = ctx->mHDMIDisplay->getMDPScalingMode();
+    ctx->dpyAttr[dpy].vsync_period = ctx->mHDMIDisplay->getVsyncPeriod();
+    ctx->mViewFrame[dpy].left = 0;
+    ctx->mViewFrame[dpy].top = 0;
+    ctx->mViewFrame[dpy].right = ctx->dpyAttr[dpy].xres;
+    ctx->mViewFrame[dpy].bottom = ctx->dpyAttr[dpy].yres;
+    //FIXME: for now assume HDMI as secure
+    //Will need to read the HDCP status from the driver
+    //and update this accordingly
+    if (dpy == HWC_DISPLAY_EXTERNAL) {
+        ctx->dpyAttr[dpy].secure = true;
+    }
+}
+
+// Reset hdmi display attributes and list stats structures
+void resetDisplayInfo(hwc_context_t* ctx, int dpy) {
+    memset(&(ctx->dpyAttr[dpy]), 0, sizeof(ctx->dpyAttr[dpy]));
+    memset(&(ctx->listStats[dpy]), 0, sizeof(ctx->listStats[dpy]));
+    // We reset the fd to -1 here but External display class is responsible
+    // for it when the display is disconnected. This is handled as part of
+    // EXTERNAL_OFFLINE event.
+    ctx->dpyAttr[dpy].fd = -1;
+}
+
+// Initialize composition resources
+void initCompositionResources(hwc_context_t* ctx, int dpy) {
+    ctx->mFBUpdate[dpy] = IFBUpdate::getObject(ctx, dpy);
+    ctx->mMDPComp[dpy] = MDPComp::getObject(ctx, dpy);
+}
+
+void destroyCompositionResources(hwc_context_t* ctx, int dpy) {
+    if(ctx->mFBUpdate[dpy]) {
+        delete ctx->mFBUpdate[dpy];
+        ctx->mFBUpdate[dpy] = NULL;
+    }
+    if(ctx->mMDPComp[dpy]) {
+        delete ctx->mMDPComp[dpy];
+        ctx->mMDPComp[dpy] = NULL;
+    }
+}
 
 static int openFramebufferDevice(hwc_context_t *ctx)
 {
@@ -138,6 +188,8 @@ static int openFramebufferDevice(hwc_context_t *ctx)
     ctx->dpyAttr[HWC_DISPLAY_PRIMARY].ydpi = ydpi;
     ctx->dpyAttr[HWC_DISPLAY_PRIMARY].vsync_period = 1000000000l / fps;
     ctx->dpyAttr[HWC_DISPLAY_PRIMARY].secure = true;
+    ctx->dpyAttr[HWC_DISPLAY_PRIMARY].refreshRate = (uint32_t)fps;
+    ctx->dpyAttr[HWC_DISPLAY_PRIMARY].dynRefreshRate = (uint32_t)fps;
 
     //Unblank primary on first boot
     if(ioctl(fb_fd, FBIOBLANK,FB_BLANK_UNBLANK) < 0) {
@@ -160,11 +212,8 @@ void initContext(hwc_context_t *ctx)
     ctx->mOverlay = overlay::Overlay::getInstance();
     ctx->mRotMgr = RotMgr::getInstance();
 
-    //Is created and destroyed only once for primary
-    //For external it could get created and destroyed multiple times depending
-    //on what external we connect to.
-    ctx->mFBUpdate[HWC_DISPLAY_PRIMARY] =
-        IFBUpdate::getObject(ctx, HWC_DISPLAY_PRIMARY);
+    // Initialize composition objects for the primary display
+    initCompositionResources(ctx, HWC_DISPLAY_PRIMARY);
 
     // Check if the target supports copybit compostion (dyn/mdp) to
     // decide if we need to open the copybit module.
@@ -180,9 +229,14 @@ void initContext(hwc_context_t *ctx)
                                                          HWC_DISPLAY_PRIMARY);
     }
 
-    ctx->mExtDisplay = new ExternalDisplay(ctx);
+    ctx->mHDMIDisplay = new HDMIDisplay();
     ctx->mVirtualDisplay = new VirtualDisplay(ctx);
     ctx->mVirtualonExtActive = false;
+    // Send the primary resolution to the external display class
+    // to be used for MDP scaling functionality
+    uint32_t priW = ctx->dpyAttr[HWC_DISPLAY_PRIMARY].xres;
+    uint32_t priH = ctx->dpyAttr[HWC_DISPLAY_PRIMARY].yres;
+    ctx->mHDMIDisplay->setPrimaryAttributes(priW, priH);
     ctx->dpyAttr[HWC_DISPLAY_EXTERNAL].isActive = false;
     ctx->dpyAttr[HWC_DISPLAY_EXTERNAL].connected = false;
     ctx->dpyAttr[HWC_DISPLAY_VIRTUAL].isActive = false;
@@ -191,9 +245,14 @@ void initContext(hwc_context_t *ctx)
     ctx->dpyAttr[HWC_DISPLAY_EXTERNAL].mDownScaleMode = false;
     ctx->dpyAttr[HWC_DISPLAY_VIRTUAL].mDownScaleMode = false;
 
-    ctx->mMDPComp[HWC_DISPLAY_PRIMARY] =
-         MDPComp::getObject(ctx, HWC_DISPLAY_PRIMARY);
     ctx->dpyAttr[HWC_DISPLAY_PRIMARY].connected = true;
+    //Initialize the primary display viewFrame info
+    ctx->mViewFrame[HWC_DISPLAY_PRIMARY].left = 0;
+    ctx->mViewFrame[HWC_DISPLAY_PRIMARY].top = 0;
+    ctx->mViewFrame[HWC_DISPLAY_PRIMARY].right =
+        (int)ctx->dpyAttr[HWC_DISPLAY_PRIMARY].xres;
+    ctx->mViewFrame[HWC_DISPLAY_PRIMARY].bottom =
+         (int)ctx->dpyAttr[HWC_DISPLAY_PRIMARY].yres;
 
     ctx->mVDSEnabled = false;
     if((property_get("persist.hwc.enable_vds", value, NULL) > 0)) {
@@ -260,6 +319,13 @@ void initContext(hwc_context_t *ctx)
     ctx->mGPUHintInfo.mEGLContext = NULL;
     ctx->mGPUHintInfo.mPrevCompositionGLES = false;
     ctx->mGPUHintInfo.mCurrGPUPerfMode = EGL_GPU_LEVEL_0;
+
+    ctx->mUseMetaDataRefreshRate = true;
+    if(property_get("persist.metadata_dynfps.disable", value, "false")
+            && !strcmp(value, "true")) {
+        ctx->mUseMetaDataRefreshRate = false;
+    }
+
     memset(&(ctx->mPtorInfo), 0, sizeof(ctx->mPtorInfo));
     ctx->mHPDEnabled = false;
     ALOGI("Initializing Qualcomm Hardware Composer");
@@ -290,9 +356,9 @@ void closeContext(hwc_context_t *ctx)
         ctx->dpyAttr[HWC_DISPLAY_PRIMARY].fd = -1;
     }
 
-    if(ctx->mExtDisplay) {
-        delete ctx->mExtDisplay;
-        ctx->mExtDisplay = NULL;
+    if(ctx->mHDMIDisplay) {
+        delete ctx->mHDMIDisplay;
+        ctx->mHDMIDisplay = NULL;
     }
 
 #ifdef VPU_TARGET
@@ -302,14 +368,8 @@ void closeContext(hwc_context_t *ctx)
 #endif
 
     for(int i = 0; i < HWC_NUM_DISPLAY_TYPES; i++) {
-        if(ctx->mFBUpdate[i]) {
-            delete ctx->mFBUpdate[i];
-            ctx->mFBUpdate[i] = NULL;
-        }
-        if(ctx->mMDPComp[i]) {
-            delete ctx->mMDPComp[i];
-            ctx->mMDPComp[i] = NULL;
-        }
+        destroyCompositionResources(ctx, i);
+
         if(ctx->mHwcDebug[i]) {
             delete ctx->mHwcDebug[i];
             ctx->mHwcDebug[i] = NULL;
@@ -331,6 +391,50 @@ void closeContext(hwc_context_t *ctx)
 
 }
 
+//Helper to roundoff the refreshrates
+uint32_t roundOff(uint32_t refreshRate) {
+    int count =  (int) (sizeof(stdRefreshRates)/sizeof(stdRefreshRates[0]));
+    uint32_t rate = refreshRate;
+    for(int i=0; i< count; i++) {
+        if(abs(stdRefreshRates[i] - refreshRate) < 2) {
+            // Most likely used for video, the fps can fluctuate
+            // Ex: b/w 29 and 30 for 30 fps clip
+            rate = stdRefreshRates[i];
+            break;
+        }
+    }
+    return rate;
+}
+
+//Helper func to set the dyn fps
+void setRefreshRate(hwc_context_t* ctx, int dpy, uint32_t refreshRate) {
+    //Update only if different
+    if(!ctx || refreshRate == ctx->dpyAttr[dpy].dynRefreshRate)
+        return;
+    const int fbNum = Overlay::getFbForDpy(dpy);
+    char sysfsPath[MAX_SYSFS_FILE_PATH];
+    snprintf (sysfsPath, sizeof(sysfsPath),
+            "/sys/class/graphics/fb%d/dynamic_fps", fbNum);
+
+    int fd = open(sysfsPath, O_WRONLY);
+    if(fd >= 0) {
+        char str[64];
+        snprintf(str, sizeof(str), "%d", refreshRate);
+        ssize_t ret = write(fd, str, strlen(str));
+        if(ret < 0) {
+            ALOGE("%s: Failed to write %d with error %s",
+                    __FUNCTION__, refreshRate, strerror(errno));
+        } else {
+            ctx->dpyAttr[dpy].dynRefreshRate = refreshRate;
+            ALOGD_IF(HWC_UTILS_DEBUG, "%s: Wrote %d to dynamic_fps",
+                     __FUNCTION__, refreshRate);
+        }
+        close(fd);
+    } else {
+        ALOGE("%s: Failed to open %s with error %s", __FUNCTION__, sysfsPath,
+              strerror(errno));
+    }
+}
 
 void dumpsys_log(android::String8& buf, const char* fmt, ...)
 {
@@ -365,12 +469,12 @@ void getActionSafePosition(hwc_context_t *ctx, int dpy, hwc_rect_t& rect) {
     float xRatio = 1.0;
     float yRatio = 1.0;
 
-    int fbWidth = ctx->dpyAttr[dpy].xres;
-    int fbHeight = ctx->dpyAttr[dpy].yres;
+    uint32_t fbWidth = ctx->dpyAttr[dpy].xres;
+    uint32_t fbHeight = ctx->dpyAttr[dpy].yres;
     if(ctx->dpyAttr[dpy].mDownScaleMode) {
-        // if downscale Mode is enabled for external, need to query
+        // if MDP scaling mode is enabled for external, need to query
         // the actual width and height, as that is the physical w & h
-         ctx->mExtDisplay->getAttributes(fbWidth, fbHeight);
+         ctx->mHDMIDisplay->getAttributes(fbWidth, fbHeight);
     }
 
 
@@ -447,8 +551,8 @@ void getAspectRatioPosition(hwc_context_t* ctx, int dpy, int extOrientation,
     if(extOrientation & HAL_TRANSFORM_ROT_90) {
         // Swap width/height for input position
         swapWidthHeight(actualWidth, actualHeight);
-        getAspectRatioPosition(fbWidth, fbHeight, (int)actualWidth,
-                               (int)actualHeight, rect);
+        qdutils::getAspectRatioPosition((int)fbWidth, (int)fbHeight,
+                                (int)actualWidth, (int)actualHeight, rect);
         xPos = rect.left;
         yPos = rect.top;
         width = rect.right - rect.left;
@@ -480,7 +584,8 @@ void getAspectRatioPosition(hwc_context_t* ctx, int dpy, int extOrientation,
         xRatio = (outPos.x - xPos)/width;
         // GetaspectRatio -- tricky to get the correct aspect ratio
         // But we need to do this.
-        getAspectRatioPosition(width, height, width, height, r);
+        qdutils::getAspectRatioPosition((int)width, (int)height,
+                               (int)width,(int)height, r);
         xPos = r.left;
         yPos = r.top;
         float tempWidth = r.right - r.left;
@@ -501,9 +606,9 @@ void getAspectRatioPosition(hwc_context_t* ctx, int dpy, int extOrientation,
                  outPos.w, outPos.h);
     }
     if(ctx->dpyAttr[dpy].mDownScaleMode) {
-        int extW, extH;
+        uint32_t extW = 0, extH = 0;
         if(dpy == HWC_DISPLAY_EXTERNAL)
-            ctx->mExtDisplay->getAttributes(extW, extH);
+            ctx->mHDMIDisplay->getAttributes(extW, extH);
         else
             ctx->mVirtualDisplay->getAttributes(extW, extH);
         fbWidth  = ctx->dpyAttr[dpy].xres;
@@ -563,7 +668,7 @@ void calcExtDisplayPosition(hwc_context_t *ctx,
                 if(!isPrimaryPortrait(ctx)) {
                     swap(srcWidth, srcHeight);
                 }                    // Get Aspect Ratio for external
-                getAspectRatioPosition(dstWidth, dstHeight, srcWidth,
+                qdutils::getAspectRatioPosition(dstWidth, dstHeight, srcWidth,
                                     srcHeight, displayFrame);
                 // Crop - this is needed, because for sidesync, the dest fb will
                 // be in portrait orientation, so update the crop to not show the
@@ -577,14 +682,14 @@ void calcExtDisplayPosition(hwc_context_t *ctx,
                 }
             }
             if(ctx->dpyAttr[dpy].mDownScaleMode) {
-                int extW, extH;
-                // if downscale is enabled, map the co-ordinates to new
+                uint32_t extW = 0, extH = 0;
+                // if MDP scaling mode is enabled, map the co-ordinates to new
                 // domain(downscaled)
                 float fbWidth  = ctx->dpyAttr[dpy].xres;
                 float fbHeight = ctx->dpyAttr[dpy].yres;
                 // query MDP configured attributes
                 if(dpy == HWC_DISPLAY_EXTERNAL)
-                    ctx->mExtDisplay->getAttributes(extW, extH);
+                    ctx->mHDMIDisplay->getAttributes(extW, extH);
                 else
                     ctx->mVirtualDisplay->getAttributes(extW, extH);
                 //Calculate the ratio...
@@ -802,6 +907,9 @@ void setListStats(hwc_context_t *ctx,
     ctx->listStats[dpy].yuv4k2kCount = 0;
     ctx->dpyAttr[dpy].mActionSafePresent = isActionSafePresent(ctx, dpy);
     ctx->listStats[dpy].renderBufIndexforABC = -1;
+    ctx->listStats[dpy].refreshRateRequest = ctx->dpyAttr[dpy].refreshRate;
+    uint32_t refreshRate = 0;
+    qdutils::MDPVersion& mdpHw = qdutils::MDPVersion::getInstance();
 
     trimList(ctx, list, dpy);
     optimizeLayerRects(ctx, list, dpy);
@@ -848,6 +956,27 @@ void setListStats(hwc_context_t *ctx,
         if(layer->blending == HWC_BLENDING_PREMULT)
             ctx->listStats[dpy].preMultipliedAlpha = true;
 
+#ifdef DYNAMIC_FPS
+        if (!dpy && mdpHw.isDynFpsSupported() && ctx->mUseMetaDataRefreshRate){
+            //dyn fps: get refreshrate from metadata
+            //Support multiple refresh rates if they are same
+            //else set to  default
+            MetaData_t *mdata = hnd ? (MetaData_t *)hnd->base_metadata : NULL;
+            if (mdata && (mdata->operation & UPDATE_REFRESH_RATE)) {
+                // Valid refreshRate in metadata and within the range
+                uint32_t rate = roundOff(mdata->refreshrate);
+                if((rate >= mdpHw.getMinFpsSupported() &&
+                                rate <= mdpHw.getMaxFpsSupported())) {
+                    if (!refreshRate) {
+                        refreshRate = rate;
+                    } else if(refreshRate != rate) {
+                        // multiple refreshrate requests, set to default
+                        refreshRate = ctx->dpyAttr[dpy].refreshRate;
+                    }
+                }
+            }
+        }
+#endif
     }
     if(ctx->listStats[dpy].yuvCount > 0) {
         if (property_get("hw.cabl.yuv", property, NULL) > 0) {
@@ -871,6 +1000,9 @@ void setListStats(hwc_context_t *ctx,
 
     if(dpy == HWC_DISPLAY_PRIMARY) {
         ctx->mAD->markDoable(ctx, list);
+        //Store the requested fresh rate
+        ctx->listStats[dpy].refreshRateRequest = refreshRate ?
+                                refreshRate : ctx->dpyAttr[dpy].refreshRate;
     }
 }
 
@@ -934,7 +1066,7 @@ bool isActionSafePresent(hwc_context_t *ctx, int dpy) {
     // Disable Actionsafe for non HDMI displays.
     if(!(dpy == HWC_DISPLAY_EXTERNAL) ||
         qdutils::MDPVersion::getInstance().is8x74v2() ||
-        ctx->mExtDisplay->isCEUnderscanSupported()) {
+        ctx->mHDMIDisplay->isCEUnderscanSupported()) {
         return false;
     }
 
@@ -1452,6 +1584,10 @@ void setMdpFlags(hwc_layer_1_t *layer,
 int configRotator(Rotator *rot, Whf& whf,
         hwc_rect_t& crop, const eMdpFlags& mdpFlags,
         const eTransform& orient, const int& downscale) {
+
+    //Check if input switched from secure->non-secure OR non-secure->secure
+    //Need to fail rotator setup as rotator buffer needs reallocation.
+    if(!rot->isRotBufReusable(mdpFlags)) return -1;
 
     // Fix alignments for TILED format
     if(whf.format == MDP_Y_CRCB_H2V2_TILE ||

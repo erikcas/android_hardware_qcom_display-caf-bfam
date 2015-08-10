@@ -7,6 +7,7 @@ common_includes += hardware/qcom/display-caf-bfam/libhwcomposer
 common_includes += hardware/qcom/display-caf-bfam/libexternal
 common_includes += hardware/qcom/display-caf-bfam/libqservice
 common_includes += hardware/qcom/display-caf-bfam/libvirtual
+common_includes += hardware/qcom/display-caf-bfam/libhdmi
 
 ifeq ($(TARGET_USES_POST_PROCESSING),true)
     common_flags     += -DUSES_POST_PROCESSING

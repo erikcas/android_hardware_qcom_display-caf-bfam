@@ -61,9 +61,7 @@ HWCVirtualVDS::HWCVirtualVDS() {
 
 void HWCVirtualVDS::init(hwc_context_t *ctx) {
     const int dpy = HWC_DISPLAY_VIRTUAL;
-    ctx->mFBUpdate[dpy] =
-            IFBUpdate::getObject(ctx, dpy);
-    ctx->mMDPComp[dpy] =  MDPComp::getObject(ctx, dpy);
+    initCompositionResources(ctx, dpy);
 
     if(ctx->mFBUpdate[dpy])
         ctx->mFBUpdate[dpy]->reset();
@@ -81,20 +79,16 @@ void HWCVirtualVDS::destroy(hwc_context_t *ctx, size_t numDisplays,
         displays[dpy] == NULL)) {
         ctx->dpyAttr[dpy].connected = false;
         ctx->dpyAttr[dpy].isPause = false;
+        ctx->dpyAttr[dpy].isActive = false;
 
-        if(ctx->mFBUpdate[dpy]) {
-            delete ctx->mFBUpdate[dpy];
-            ctx->mFBUpdate[dpy] = NULL;
-        }
-        if(ctx->mMDPComp[dpy]) {
-            delete ctx->mMDPComp[dpy];
-            ctx->mMDPComp[dpy] = NULL;
-        }
+        destroyCompositionResources(ctx, dpy);
+
         // We reset the WB session to non-secure when the virtual display
         // has been disconnected.
         if(!Writeback::getInstance()->setSecure(false)) {
             ALOGE("Failure while attempting to reset WB session.");
         }
+
         ctx->mWfdSyncLock.lock();
         ctx->mWfdSyncLock.signal();
         ctx->mWfdSyncLock.unlock();
@@ -120,6 +114,7 @@ int HWCVirtualVDS::prepare(hwc_composer_device_1 *dev,
         if(ctx->dpyAttr[dpy].connected == false) {
             ctx->dpyAttr[dpy].connected = true;
             ctx->dpyAttr[dpy].isPause = false;
+            ctx->dpyAttr[dpy].isActive = true;
             // We set the vsync period to the primary refresh rate, leaving
             // it up to the consumer to decide how fast to consume frames.
             ctx->dpyAttr[dpy].vsync_period
@@ -240,42 +235,38 @@ int HWCVirtualVDS::set(hwc_context_t *ctx, hwc_display_contents_1_t *list) {
 
 void HWCVirtualVDS::pause(hwc_context_t* ctx, int dpy) {
     {
-        Locker::Autolock _l(ctx->mDrawLock);
+        ctx->mDrawLock.lock();
         ctx->dpyAttr[dpy].isActive = true;
         ctx->dpyAttr[dpy].isPause = true;
         ctx->proc->invalidate(ctx->proc);
+        ctx->mDrawLock.wait();
     }
-    usleep(ctx->dpyAttr[HWC_DISPLAY_PRIMARY].vsync_period
-            * 2 / 1000);
     // At this point all the pipes used by External have been
     // marked as UNSET.
-    {
-        Locker::Autolock _l(ctx->mDrawLock);
-        // Perform commit to unstage the pipes.
-        if (!Overlay::displayCommit(ctx->dpyAttr[dpy].fd)) {
-            ALOGE("%s: display commit fail! for %d dpy",
-                    __FUNCTION__, dpy);
-        }
-        ctx->proc->invalidate(ctx->proc);
+    // Perform commit to unstage the pipes.
+    ALOGD_IF(HWCVIRTUAL_LOG, "%s: VDS calling commit",
+             __FUNCTION__);
+    if (!Overlay::displayCommit(ctx->dpyAttr[dpy].fd)) {
+        ALOGE("%s: display commit fail! for %d dpy",
+                __FUNCTION__, dpy);
     }
+    ctx->mDrawLock.unlock();
+    ctx->proc->invalidate(ctx->proc);
     return;
 }
 
 void HWCVirtualVDS::resume(hwc_context_t* ctx, int dpy) {
     {
-        Locker::Autolock _l(ctx->mDrawLock);
+        ctx->mDrawLock.lock();
         ctx->dpyAttr[dpy].isConfiguring = true;
         ctx->dpyAttr[dpy].isActive = true;
         ctx->proc->invalidate(ctx->proc);
+        ctx->mDrawLock.wait();
     }
-    usleep(ctx->dpyAttr[HWC_DISPLAY_PRIMARY].vsync_period
-            * 2 / 1000);
     //At this point external has all the pipes it would need.
-    {
-        Locker::Autolock _l(ctx->mDrawLock);
-        ctx->dpyAttr[dpy].isPause = false;
-        ctx->proc->invalidate(ctx->proc);
-    }
+    ctx->dpyAttr[dpy].isPause = false;
+    ctx->mDrawLock.unlock();
+    ctx->proc->invalidate(ctx->proc);
     return;
 }
 
@@ -374,23 +365,22 @@ int HWCVirtualV4L2::set(hwc_context_t *ctx, hwc_display_contents_1_t *list) {
 
 void HWCVirtualV4L2::pause(hwc_context_t* ctx, int dpy) {
     {
-        Locker::Autolock _l(ctx->mDrawLock);
+        ctx->mDrawLock.lock();
         ctx->dpyAttr[dpy].isActive = true;
         ctx->dpyAttr[dpy].isPause = true;
         ctx->proc->invalidate(ctx->proc);
+        ctx->mDrawLock.wait();
     }
-    usleep(ctx->dpyAttr[HWC_DISPLAY_PRIMARY].vsync_period
-            * 2 / 1000);
     // At this point all the pipes used by External have been
     // marked as UNSET.
-    {
-        Locker::Autolock _l(ctx->mDrawLock);
-        // Perform commit to unstage the pipes.
-        if (!Overlay::displayCommit(ctx->dpyAttr[dpy].fd)) {
-            ALOGE("%s: display commit fail! for %d dpy",
-                    __FUNCTION__, dpy);
-        }
+    // Perform commit to unstage the pipes.
+    ALOGD_IF(HWCVIRTUAL_LOG, "%s: V4L2 calling commit",
+             __FUNCTION__);
+    if (!Overlay::displayCommit(ctx->dpyAttr[dpy].fd)) {
+        ALOGE("%s: display commit fail! for %d dpy",
+                __FUNCTION__, dpy);
     }
+    ctx->mDrawLock.unlock();
     return;
 }
 
@@ -399,8 +389,7 @@ void HWCVirtualV4L2::resume(hwc_context_t* ctx, int dpy){
     //Since external didnt have any pipes, force primary to give up
     //its pipes; we don't allow inter-mixer pipe transfers.
     {
-        Locker::Autolock _l(ctx->mDrawLock);
-
+        ctx->mDrawLock.lock();
         // A dynamic resolution change (DRC) can be made for a WiFi
         // display. In order to support the resolution change, we
         // need to reconfigure the corresponding display attributes.
@@ -413,14 +402,13 @@ void HWCVirtualV4L2::resume(hwc_context_t* ctx, int dpy){
         ctx->dpyAttr[dpy].isConfiguring = true;
         ctx->dpyAttr[dpy].isActive = true;
         ctx->proc->invalidate(ctx->proc);
+        ctx->mDrawLock.wait();
     }
-    usleep(ctx->dpyAttr[HWC_DISPLAY_PRIMARY].vsync_period
-            * 2 / 1000);
     //At this point external has all the pipes it would need.
     {
-        Locker::Autolock _l(ctx->mDrawLock);
         ctx->dpyAttr[dpy].isPause = false;
         ctx->proc->invalidate(ctx->proc);
+        ctx->mDrawLock.unlock();
     }
     return;
 }
