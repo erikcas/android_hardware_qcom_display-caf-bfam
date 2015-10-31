@@ -94,6 +94,9 @@ int gpu_context_t::gralloc_alloc_buffer(unsigned int size, int usage,
         if (usage & GRALLOC_USAGE_PRIVATE_EXTERNAL_ONLY) {
             flags |= private_handle_t::PRIV_FLAGS_EXTERNAL_ONLY;
         }
+        if (usage & GRALLOC_USAGE_PRIVATE_INTERNAL_ONLY) {
+            flags |= private_handle_t::PRIV_FLAGS_INTERNAL_ONLY;
+        }
 
         ColorSpace_t colorSpace = ITU_R_601;
         flags |= private_handle_t::PRIV_FLAGS_ITU_R_601;
@@ -149,8 +152,8 @@ int gpu_context_t::gralloc_alloc_buffer(unsigned int size, int usage,
             flags |= private_handle_t::PRIV_FLAGS_TILE_RENDERED;
         }
 
-        if (AdrenoMemInfo::getInstance().isUBWCSupportedByGPU(format) &&
-            isUBwcEnabled(format, usage)) {
+        if (isUBwcEnabled(format, usage) &&
+            AdrenoMemInfo::getInstance().isUBWCSupportedByGPU(format)) {
             flags |= private_handle_t::PRIV_FLAGS_UBWC_ALIGNED;
         }
 
@@ -193,11 +196,8 @@ void gpu_context_t::getGrallocInformationFromFormat(int inputFormat,
 {
     *bufferType = BUFFER_TYPE_VIDEO;
 
-    if (inputFormat <= HAL_PIXEL_FORMAT_sRGB_X_8888) {
+    if (isUncompressedRgbFormat(inputFormat) == TRUE) {
         // RGB formats
-        *bufferType = BUFFER_TYPE_UI;
-    } else if ((inputFormat == HAL_PIXEL_FORMAT_R_8) ||
-               (inputFormat == HAL_PIXEL_FORMAT_RG_88)) {
         *bufferType = BUFFER_TYPE_UI;
     }
 }

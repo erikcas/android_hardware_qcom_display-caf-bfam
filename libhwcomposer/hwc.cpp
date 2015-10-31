@@ -189,6 +189,18 @@ static void setNumActiveDisplays(hwc_context_t *ctx, int numDisplays,
     }
 }
 
+static bool validDisplay(int disp) {
+    switch(disp) {
+        case HWC_DISPLAY_PRIMARY:
+        case HWC_DISPLAY_EXTERNAL:
+        case HWC_DISPLAY_VIRTUAL:
+            return true;
+            break;
+        default:
+            return false;
+    }
+}
+
 static bool isHotPluggable(hwc_context_t *ctx, int dpy) {
     return ((dpy == HWC_DISPLAY_EXTERNAL) ||
             ((dpy == HWC_DISPLAY_PRIMARY) &&
@@ -320,7 +332,6 @@ static int hwc_prepare_primary(hwc_composer_device_1 *dev,
             if(ctx->mCopyBit[dpy])
                 ctx->mCopyBit[dpy]->prepare(ctx, list, dpy);
         }
-        setGPUHint(ctx, list);
     }
     return 0;
 }
@@ -419,6 +430,10 @@ static int hwc_eventControl(struct hwc_composer_device_1* dev, int dpy,
     ATRACE_CALL();
     int ret = 0;
     hwc_context_t* ctx = (hwc_context_t*)(dev);
+    if(!validDisplay(dpy)) {
+        return -EINVAL;
+    }
+
     switch(event) {
         case HWC_EVENT_VSYNC:
             if (ctx->vstate.enable == enable)
@@ -429,7 +444,7 @@ static int hwc_eventControl(struct hwc_composer_device_1* dev, int dpy,
             ALOGD_IF (VSYNC_DEBUG, "VSYNC state changed to %s",
                       (enable)?"ENABLED":"DISABLED");
             break;
-#ifdef QCOM_BSP
+#ifdef QTI_BSP
         case  HWC_EVENT_ORIENTATION:
             if(dpy == HWC_DISPLAY_PRIMARY) {
                 Locker::Autolock _l(ctx->mDrawLock);
@@ -476,6 +491,11 @@ static int hwc_setPowerMode(struct hwc_composer_device_1* dev, int dpy,
     int ret = 0, value = 0;
 
     Locker::Autolock _l(ctx->mDrawLock);
+
+    if(!validDisplay(dpy)) {
+        return -EINVAL;
+    }
+
     ALOGD_IF(POWER_MODE_DEBUG, "%s: Setting mode %d on display: %d",
             __FUNCTION__, mode, dpy);
 
@@ -718,7 +738,6 @@ static int hwc_set_external(hwc_context_t *ctx,
 
     const int dpy = HWC_DISPLAY_EXTERNAL;
 
-
     if (LIKELY(list) && ctx->dpyAttr[dpy].isActive &&
         ctx->dpyAttr[dpy].connected &&
         !ctx->dpyAttr[dpy].isPause) {
@@ -793,6 +812,14 @@ static int hwc_set(hwc_composer_device_1 *dev,
     ctx->mVideoTransFlag = false;
     //Was locked at the beginning of prepare
     ctx->mDrawLock.unlock();
+
+    if(ctx->triggerRefresh) {
+        ctx->triggerRefresh = false;
+        if(ctx->proc) {
+            ctx->proc->invalidate(ctx->proc);
+        }
+    }
+
     return ret;
 }
 
@@ -801,6 +828,11 @@ int hwc_getDisplayConfigs(struct hwc_composer_device_1* dev, int disp,
     hwc_context_t* ctx = (hwc_context_t*)(dev);
 
     Locker::Autolock _l(ctx->mDrawLock);
+
+    if(!validDisplay(disp)) {
+        return -EINVAL;
+    }
+
     bool hotPluggable = isHotPluggable(ctx, disp);
     bool isVirtualDisplay = (disp == HWC_DISPLAY_VIRTUAL);
     // If hotpluggable or virtual displays are inactive return error
@@ -840,6 +872,11 @@ int hwc_getDisplayAttributes(struct hwc_composer_device_1* dev, int disp,
     hwc_context_t* ctx = (hwc_context_t*)(dev);
 
     Locker::Autolock _l(ctx->mDrawLock);
+
+    if(!validDisplay(disp)) {
+        return -EINVAL;
+    }
+
     bool hotPluggable = isHotPluggable(ctx, disp);
     bool isVirtualDisplay = (disp == HWC_DISPLAY_VIRTUAL);
     // If hotpluggable or virtual displays are inactive return error
@@ -855,7 +892,6 @@ int hwc_getDisplayAttributes(struct hwc_composer_device_1* dev, int disp,
         HWC_DISPLAY_HEIGHT,
         HWC_DISPLAY_DPI_X,
         HWC_DISPLAY_DPI_Y,
-        HWC_DISPLAY_SECURE,
         HWC_DISPLAY_NO_ATTRIBUTE,
     };
 
@@ -908,9 +944,6 @@ int hwc_getDisplayAttributes(struct hwc_composer_device_1* dev, int disp,
         case HWC_DISPLAY_DPI_Y:
             values[i] = (int32_t) (ctx->dpyAttr[disp].ydpi*1000.0);
             break;
-        case HWC_DISPLAY_SECURE:
-            values[i] = (int32_t) (ctx->dpyAttr[disp].secure);
-            break;
         default:
             ALOGE("Unknown display attribute %d",
                     attributes[i]);
@@ -960,6 +993,10 @@ int hwc_getActiveConfig(struct hwc_composer_device_1* dev, int disp)
     hwc_context_t* ctx = (hwc_context_t*)(dev);
 
     Locker::Autolock _l(ctx->mDrawLock);
+    if(!validDisplay(disp)) {
+        return -EINVAL;
+    }
+
     bool hotPluggable = isHotPluggable(ctx, disp);
     bool isVirtualDisplay = (disp == HWC_DISPLAY_VIRTUAL);
     // If hotpluggable or virtual displays are inactive return error
@@ -982,6 +1019,10 @@ int hwc_setActiveConfig(struct hwc_composer_device_1* dev, int disp, int index)
     hwc_context_t* ctx = (hwc_context_t*)(dev);
 
     Locker::Autolock _l(ctx->mDrawLock);
+    if(!validDisplay(disp)) {
+        return -EINVAL;
+    }
+
     bool hotPluggable = isHotPluggable(ctx, disp);
     bool isVirtualDisplay = (disp == HWC_DISPLAY_VIRTUAL);
     // If hotpluggable or virtual displays are inactive return error
@@ -1033,7 +1074,7 @@ static int hwc_device_open(const struct hw_module_t* module, const char* name,
 
         //Setup HWC methods
         dev->device.common.tag          = HARDWARE_DEVICE_TAG;
-        dev->device.common.version      = HWC_DEVICE_API_VERSION_1_4;
+        dev->device.common.version      = HWC_DEVICE_API_VERSION_1_5;
         dev->device.common.module       = const_cast<hw_module_t*>(module);
         dev->device.common.close        = hwc_device_close;
         dev->device.prepare             = hwc_prepare;
